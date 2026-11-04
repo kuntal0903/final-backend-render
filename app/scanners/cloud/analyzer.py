@@ -15,10 +15,15 @@ _CNAME_PATTERNS = [
     (re.compile(r"\.azurefd\.net$", re.IGNORECASE), "Azure Front Door", True, True),
     (re.compile(r"\.azurewebsites\.net$", re.IGNORECASE), "Azure", False, False),
     (re.compile(r"\.cloudflare\.net$", re.IGNORECASE), "Cloudflare", True, True),
+    (re.compile(r"\.cloudflare\.com$", re.IGNORECASE), "Cloudflare", True, True),
+    (re.compile(r"\.cdn\.cloudflare\.net$", re.IGNORECASE), "Cloudflare", True, True),
     (re.compile(r"\.edgekey\.net$", re.IGNORECASE), "Akamai", True, False),
     (re.compile(r"\.edgesuite\.net$", re.IGNORECASE), "Akamai", True, False),
+    (re.compile(r"\.akamaiedge\.net$", re.IGNORECASE), "Akamai", True, False),
     (re.compile(r"\.akamai\.net$", re.IGNORECASE), "Akamai", True, False),
+    (re.compile(r"\.akamai\.com$", re.IGNORECASE), "Akamai", True, False),
     (re.compile(r"\.fastly\.net$", re.IGNORECASE), "Fastly", True, False),
+    (re.compile(r"\.fastlylb\.net$", re.IGNORECASE), "Fastly", True, False),
     (re.compile(r"\.fastly-edge\.com$", re.IGNORECASE), "Fastly", True, False),
     (re.compile(r"\.netlify\.app$", re.IGNORECASE), "Netlify", True, False),
     (re.compile(r"\.vercel\.app$", re.IGNORECASE), "Vercel", True, False),
@@ -68,6 +73,10 @@ def analyze_headers(headers: dict[str, str]) -> tuple[str, bool, str] | None:
         return "AWS CloudFront", True, "x-amz-cf-id"
     if "x-azure-ref" in norm_headers:
         return "Azure Front Door", True, "x-azure-ref"
+    if "x-fastly-request-id" in norm_headers or "fastly-restarts" in norm_headers:
+        return "Fastly", True, "x-fastly-request-id"
+    if "x-akamai-transformed" in norm_headers or "x-akamai-request-id" in norm_headers:
+        return "Akamai", True, "x-akamai-transformed"
 
     # 2. Server header inspection
     server_val = norm_headers.get("server", "")
@@ -79,6 +88,8 @@ def analyze_headers(headers: dict[str, str]) -> tuple[str, bool, str] | None:
         return "GCP", False, f"server: {server_val}"
     if "microsoft-iis" in server_val:
         return "Azure", False, "server: microsoft-iis"
+    if "akamaighost" in server_val or "akamai" in server_val:
+        return "Akamai", True, "server: akamai"
 
     # 3. Via header inspection
     via_val = norm_headers.get("via", "")
@@ -123,11 +134,19 @@ def analyze_headers_details(headers: dict[str, str]) -> list[tuple[str, bool, bo
     if "x-azure-ref" in norm_headers:
         findings.append(("Azure Front Door", True, True, "header: x-azure-ref"))
 
+    if "x-fastly-request-id" in norm_headers or "fastly-restarts" in norm_headers:
+        findings.append(("Fastly", True, False, "header: x-fastly-request-id"))
+
+    if "x-akamai-transformed" in norm_headers or "x-akamai-request-id" in norm_headers:
+        findings.append(("Akamai", True, False, "header: x-akamai-transformed"))
+
     server_val = norm_headers.get("server", "")
     if ("gws" in server_val or "google" in server_val) and not any(f[0] == "GCP" for f in findings):
         findings.append(("GCP", False, False, f"server: {server_val}"))
     if "microsoft-iis" in server_val and not any(f[0] in ("Azure", "Azure Front Door") for f in findings):
         findings.append(("Azure", False, False, "server: microsoft-iis"))
+    if "akamaighost" in server_val and not any(f[0] == "Akamai" for f in findings):
+        findings.append(("Akamai", True, False, f"server: {server_val}"))
 
     return findings
 

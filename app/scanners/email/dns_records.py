@@ -9,7 +9,47 @@ import asyncio
 import dns.asyncresolver
 import dns.exception
 import dns.resolver
+import dns.reversename
 import httpx
+
+DEFAULT_DNS_NAMESERVERS = [
+    "2001:4860:4860::8888",
+    "2606:4700:4700::1111",
+    "8.8.8.8",
+    "1.1.1.1",
+    "9.9.9.9",
+]
+
+EMAIL_PROVIDER_PATTERNS: dict[str, str] = {
+    "google.com": "Google Workspace",
+    "googlemail.com": "Google Workspace",
+    "aspmx.l.google.com": "Google Workspace",
+    "protection.outlook.com": "Microsoft 365 / Exchange Online",
+    "mail.protection.outlook.com": "Microsoft 365 / Exchange Online",
+    "mimecast.com": "Mimecast Email Security",
+    "pphosted.com": "Proofpoint Enterprise",
+    "proofpoint.com": "Proofpoint",
+    "iphmx.com": "Cisco IronPort / CES",
+    "barracudanetworks.com": "Barracuda Email Security",
+    "protonmail.ch": "ProtonMail",
+    "proton.me": "ProtonMail",
+    "zoho.com": "Zoho Mail",
+    "fastmail.com": "Fastmail",
+}
+
+DEFAULT_DKIM_SELECTORS = [
+    "default", "google", "k1", "s1", "s2", "selector1",
+    "mail", "dkim", "smtp", "mandrill", "sendgrid", "mailgun"
+]
+
+
+def identify_email_provider(exchange: str) -> str | None:
+    """Identify well-known secure email gateway / provider from exchange hostname."""
+    ex_lower = exchange.lower().rstrip(".")
+    for pattern, provider in EMAIL_PROVIDER_PATTERNS.items():
+        if ex_lower.endswith(pattern):
+            return provider
+    return None
 
 
 async def query_mx_exchanges(domain: str, timeout: float = 3.0) -> tuple[str, list[tuple[int, str]]]:
@@ -18,12 +58,13 @@ async def query_mx_exchanges(domain: str, timeout: float = 3.0) -> tuple[str, li
     
     Returns:
         tuple[str, list[tuple[int, str]]]:
-            - dns_status: VALID_MX | NO_MX_RECORD | NXDOMAIN | SERVFAIL | TIMEOUT | DNS_ERROR
+            - dns_status: VALID_MX | NO_MX_RECORD | NULL_MX | NXDOMAIN | SERVFAIL | TIMEOUT | DNS_ERROR
             - list of (priority, exchange_hostname) tuples.
     """
     resolver = dns.asyncresolver.Resolver()
     resolver.timeout = timeout
     resolver.lifetime = timeout
+    resolver.nameservers = list(DEFAULT_DNS_NAMESERVERS)
 
     try:
         answer = await resolver.resolve(domain, "MX")
@@ -31,7 +72,11 @@ async def query_mx_exchanges(domain: str, timeout: float = 3.0) -> tuple[str, li
         for rdata in sorted(answer, key=lambda r: int(r.preference)):
             ex_host = str(rdata.exchange).rstrip(".").lower()
             exchanges.append((int(rdata.preference), ex_host))
+            
         if exchanges:
+            # RFC 7505 Null MX: A single MX record with exchange "." and priority 0
+            if len(exchanges) == 1 and exchanges[0][1] in ("", "."):
+                return "NULL_MX", exchanges
             return "VALID_MX", exchanges
         return "NO_MX_RECORD", []
     except dns.resolver.NoAnswer:
@@ -59,6 +104,7 @@ async def resolve_mail_host(hostname: str, timeout: float = 3.0) -> tuple[list[s
     resolver = dns.asyncresolver.Resolver()
     resolver.timeout = timeout
     resolver.lifetime = timeout
+    resolver.nameservers = list(DEFAULT_DNS_NAMESERVERS)
 
     ipv4s = []
     ipv6s = []
@@ -100,6 +146,7 @@ async def query_txt_records(domain: str, timeout: float = 3.0) -> list[str]:
     resolver = dns.asyncresolver.Resolver()
     resolver.timeout = timeout
     resolver.lifetime = timeout
+    resolver.nameservers = list(DEFAULT_DNS_NAMESERVERS)
 
     try:
         answer = await resolver.resolve(domain, "TXT")

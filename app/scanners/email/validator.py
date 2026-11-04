@@ -5,6 +5,7 @@ Parses and validates syntax formats, mechanisms, duplicates, and policies for
 SPF, DMARC, DKIM, MTA-STS, and TLS-RPT records.
 """
 
+import base64
 import re
 from app.scanners.email.models import (
     DkimDetails,
@@ -37,7 +38,7 @@ def validate_spf_records(txt_records: list[str]) -> SpfDetails:
 
     if details.has_duplicates:
         details.is_valid = False
-        details.errors.append("Multiple SPF records found. This is invalid per RFC 7208.")
+        details.errors.append("Multiple SPF records found. Violates RFC 7208 section 3.2 and results in PermError.")
         details.strength = "none"
         return details
 
@@ -54,6 +55,7 @@ def validate_spf_records(txt_records: list[str]) -> SpfDetails:
     redirect = None
     all_token = None
     dns_lookup_count = 0
+    has_ptr_mechanism = False
 
     for token in tokens[1:]:
         token_clean = token.strip()
@@ -75,9 +77,13 @@ def validate_spf_records(txt_records: list[str]) -> SpfDetails:
             dns_lookup_count += 1
         elif token_lower.startswith(("ip4:", "ip6:")):
             mechanisms.append(token_clean)
-        elif token_lower in ("a", "mx", "ptr") or token_lower.startswith(("a:", "mx:", "ptr:", "exists:")):
+        elif token_lower in ("a", "mx") or token_lower.startswith(("a:", "mx:", "exists:")):
             mechanisms.append(token_clean)
             dns_lookup_count += 1
+        elif token_lower == "ptr" or token_lower.startswith("ptr:"):
+            mechanisms.append(token_clean)
+            dns_lookup_count += 1
+            has_ptr_mechanism = True
         else:
             mechanisms.append(token_clean)
 
@@ -92,10 +98,18 @@ def validate_spf_records(txt_records: list[str]) -> SpfDetails:
             f"SPF record contains {dns_lookup_count} DNS lookups, exceeding the RFC 7208 limit of {_MAX_SPF_DNS_LOOKUPS}."
         )
 
+    if has_ptr_mechanism:
+        details.warnings.append(
+            "SPF uses deprecated 'ptr' mechanism. Discouraged per RFC 7208 section 4.6.4 due to performance and reliability risks."
+        )
+
     if all_token:
         details.policy_qualifier = all_token
-        if all_token in ("-all", "~all"):
+        if all_token == "-all":
             details.strength = "strong"
+        elif all_token == "~all":
+            details.strength = "strong"
+            details.warnings.append("SPF policy uses softfail '~all'; consider enforcing hardfail '-all' for stricter spoofing prevention.")
         elif all_token in ("+all", "?all", "all"):
             details.strength = "weak"
             details.warnings.append(f"Insecure SPF 'all' qualifier '{all_token}' allows wide unauthorized mailing.")
@@ -127,7 +141,7 @@ def validate_dmarc_records(txt_records: list[str]) -> DmarcDetails:
 
     if details.has_duplicates:
         details.is_valid = False
-        details.errors.append("Multiple DMARC records found. This is invalid per RFC 7489.")
+        details.errors.append("Multiple DMARC records found. Violates RFC 7489 and invalidates DMARC enforcement.")
         return details
 
     dmarc_record = dmarc_records[0]
@@ -157,7 +171,7 @@ def validate_dmarc_records(txt_records: list[str]) -> DmarcDetails:
         if p_lower in ("none", "quarantine", "reject"):
             details.policy = p_lower
             if p_lower == "none":
-                details.warnings.append("DMARC policy 'p=none' runs in monitoring mode only, offering no spoofing block.")
+                details.warnings.append("DMARC policy 'p=none' runs in monitoring mode only, offering no active spoofing block.")
         else:
             details.is_valid = False
             details.errors.append(f"Invalid DMARC policy value 'p={p_val}'. Supported values: none, quarantine, reject.")
@@ -176,6 +190,8 @@ def validate_dmarc_records(txt_records: list[str]) -> DmarcDetails:
             pct_int = int(pct_val)
             if 0 <= pct_int <= 100:
                 details.percentage = pct_int
+                if pct_int < 100:
+                    details.warnings.append(f"DMARC pct tag applies policy to only {pct_int}% of mail streams.")
             else:
                 details.is_valid = False
                 details.errors.append(f"DMARC pct tag value '{pct_val}' must be an integer between 0 and 100.")
@@ -212,7 +228,7 @@ def validate_dmarc_records(txt_records: list[str]) -> DmarcDetails:
 
 def parse_dkim_selector_record(selector: str, raw_record: str) -> DkimSelectorResult:
     """
-    Parse tags inside a discovered DKIM selector TXT record.
+    Parse tags inside a discovered DKIM selector TXT record, evaluating key size and safety.
     """
     tags: dict[str, str] = {}
     parts = raw_record.split(";")
@@ -227,8 +243,19 @@ def parse_dkim_selector_record(selector: str, raw_record: str) -> DkimSelectorRe
     v_val = tags.get("v")
     k_val = tags.get("k", "rsa").lower()
     p_val = tags.get("p")
+    h_val = tags.get("h", "").lower()
+    t_val = tags.get("t", "").lower()
 
     is_valid = p_val is not None and len(p_val) > 0
+
+    # Key size calculation from base64 public key
+    key_length = None
+    if p_val:
+        try:
+            der_bytes = base64.b64decode(p_val)
+            key_length = len(der_bytes) * 8
+        except Exception:
+            pass
 
     return DkimSelectorResult(
         selector=selector,

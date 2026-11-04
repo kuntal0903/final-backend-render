@@ -118,6 +118,14 @@ def evaluate_hostname_verification(host: str, cert_details: CertDetails) -> str:
     return "valid" if evaluate_hostname_match(host, cert_details) else "mismatch"
 
 
+def is_static_rsa_key_exchange(cipher_name: str) -> bool:
+    """Check if cipher suite relies on static RSA key exchange (no forward secrecy)."""
+    c_upper = cipher_name.upper()
+    if "ECDHE" in c_upper or "DHE" in c_upper:
+        return False
+    return c_upper.startswith("RSA_") or "-RSA-" in c_upper or c_upper.startswith("TLS_RSA_")
+
+
 def probe_supported_protocols(host: str, port: int, timeout: float = 2.0) -> list[str]:
     """
     Determine which TLS versions are supported by the server.
@@ -146,6 +154,7 @@ def probe_supported_protocols(host: str, port: int, timeout: float = 2.0) -> lis
                 context.minimum_version = enum_val
                 context.maximum_version = enum_val
             except Exception:
+                # Local OpenSSL build rejected setting protocol range
                 continue
 
         try:
@@ -170,6 +179,7 @@ def probe_weak_ciphers(host: str, port: int, timeout: float = 2.0) -> tuple[bool
     try:
         context.set_ciphers(WEAK_CIPHERS_LIST)
     except Exception:
+        # Local OpenSSL build rejected cipher string
         return False, []
 
     negotiated = []
